@@ -6,114 +6,115 @@ from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
 
 # Konfigurasi Halaman
-st.set_page_config(page_title="Book Recommendation System", layout="wide")
+st.set_page_config(page_title="Book Recommendation System - Upload Mode", layout="wide")
 
-st.title("📚 Sistem Rekomendasi Buku")
+st.title("📚 Sistem Rekomendasi Buku (Upload CSV)")
 st.markdown("""
-Aplikasi ini menggunakan algoritma **k-Nearest Neighbors (kNN)** dengan *Cosine Similarity* untuk merekomendasikan buku berdasarkan kemiripan rating antar item.
+Silakan unggah 3 file CSV utama (**Books**, **Users**, dan **Ratings**) untuk memulai analisis dan sistem rekomendasi.
 """)
 
-# 1. Load Data & Preprocessing (Cashed agar cepat)
-@st.cache_data
-def load_and_process_data():
-    # Load datasets
-    books = pd.read_csv('BX-Books.csv', sep=';', error_bad_lines=False, encoding="latin-1", low_memory=False)
-    users = pd.read_csv('BX-Users.csv', sep=';', error_bad_lines=False, encoding="latin-1")
-    ratings = pd.read_csv('BX-Book-Ratings.csv', sep=';', error_bad_lines=False, encoding="latin-1")
+# --- BAGIAN UPLOAD FILE ---
+st.sidebar.header("📁 Upload Dataset")
+uploaded_books = st.sidebar.file_uploader("Upload BX-Books.csv", type="csv")
+uploaded_users = st.sidebar.file_uploader("Upload BX-Users.csv", type="csv")
+uploaded_ratings = st.sidebar.file_uploader("Upload BX-Book-Ratings.csv", type="csv")
 
+# 1. Fungsi Preprocessing (Data Imputation & Cleaning)
+@st.cache_data
+def process_data(file_books, file_users, file_ratings):
+    # Load dengan penanganan error sesuai notebook
+    books = pd.read_csv(file_books, sep=';', on_bad_lines='skip', encoding="latin-1", low_memory=False)
+    users = pd.read_csv(file_users, sep=';', on_bad_lines='skip', encoding="latin-1")
+    ratings = pd.read_csv(file_ratings, sep=';', on_bad_lines='skip', encoding="latin-1")
+
+    # Rename kolom agar konsisten dengan logika notebook
     books.columns = ['ISBN', 'bookTitle', 'bookAuthor', 'yearOfPublication', 'publisher', 'imageUrlS', 'imageUrlM', 'imageUrlL']
     users.columns = ['userID', 'Location', 'Age']
     ratings.columns = ['userID', 'ISBN', 'bookRating']
 
-    # Filter Users (Minimal 200 rating) & Ratings (Minimal 100 rating)
-    counts1 = ratings['userID'].value_counts()
-    ratings = ratings[ratings['userID'].isin(counts1[counts1 >= 200].index)]
+    # Filter Users: Minimal memberikan 200 rating
+    counts_user = ratings['userID'].value_counts()
+    ratings = ratings[ratings['userID'].isin(counts_user[counts_user >= 200].index)]
     
     # Gabungkan Rating dengan Judul Buku
     combine_book_rating = pd.merge(ratings, books, on='ISBN')
-    columns = ['yearOfPublication', 'publisher', 'bookAuthor', 'imageUrlS', 'imageUrlM', 'imageUrlL']
-    combine_book_rating = combine_book_rating.drop(columns, axis=1)
+    drop_cols = ['yearOfPublication', 'publisher', 'bookAuthor', 'imageUrlS', 'imageUrlM', 'imageUrlL']
+    combine_book_rating = combine_book_rating.drop(drop_cols, axis=1)
 
     # Hitung Total Rating per Buku
     book_ratingCount = (combine_book_rating.
-         groupby(by = ['bookTitle'])['bookRating'].
+         groupby(by=['bookTitle'])['bookRating'].
          count().reset_index().
-         rename(columns = {'bookRating': 'totalRatingCount'})
+         rename(columns={'bookRating': 'totalRatingCount'})
         )
     
-    rating_with_totalRatingCount = combine_book_rating.merge(book_ratingCount, on='bookTitle', how='left')
+    rating_with_count = combine_book_rating.merge(book_ratingCount, on='bookTitle', how='left')
 
     # Filter Buku Populer (Threshold >= 50)
     popularity_threshold = 50
-    rating_popular_book = rating_with_totalRatingCount.query('totalRatingCount >= @popularity_threshold')
+    rating_popular = rating_with_count.query('totalRatingCount >= @popularity_threshold')
 
-    # Filter Lokasi USA & Canada (Sesuai Notebook)
-    combined = rating_popular_book.merge(users, on='userID', how='left')
-    us_canada_user_rating = combined[combined['Location'].str.contains("usa|canada", na=False)]
+    # Filter Lokasi: USA & Canada
+    combined = rating_popular.merge(users, on='userID', how='left')
+    us_canada_rating = combined[combined['Location'].str.contains("usa|canada", na=False)]
     
-    # Drop duplicates dan buat Pivot Table
-    us_canada_user_rating = us_canada_user_rating.drop_duplicates(['userID', 'bookTitle'])
-    pivot = us_canada_user_rating.pivot(index='bookTitle', columns='userID', values='bookRating').fillna(0)
+    # Buat Pivot Table
+    us_canada_rating = us_canada_rating.drop_duplicates(['userID', 'bookTitle'])
+    pivot = us_canada_rating.pivot(index='bookTitle', columns='userID', values='bookRating').fillna(0)
     
     return pivot
 
-# Load data ke session state
-try:
-    with st.spinner('Memproses data... Mohon tunggu...'):
-        pivot_table = load_and_process_data()
-        matrix = csr_matrix(pivot_table.values)
-    st.success('Data berhasil dimuat!')
-except Exception as e:
-    st.error(f"Gagal memuat file CSV. Pastikan file dataset tersedia di folder aplikasi. Error: {e}")
-    st.stop()
+# --- LOGIKA APLIKASI ---
+if uploaded_books and uploaded_users and uploaded_ratings:
+    try:
+        with st.spinner('Sedang memproses file yang diunggah...'):
+            pivot_table = process_data(uploaded_books, uploaded_users, uploaded_ratings)
+            matrix = csr_matrix(pivot_table.values)
+        st.success('Data Berhasil Diproses!')
 
-# 2. Build Model
-model_knn = NearestNeighbors(metric='cosine', algorithm='brute')
-model_knn.fit(matrix)
+        # Build Model kNN
+        model_knn = NearestNeighbors(metric='cosine', algorithm='brute')
+        model_knn.fit(matrix)
 
-# 3. Sidebar - Pilih Buku
-st.sidebar.header("Pilih Judul Buku")
-book_list = pivot_table.index.tolist()
-selected_book = st.sidebar.selectbox("Ketik atau pilih buku:", book_list)
+        # Dashboard Visual
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("Total Buku Terfilter", pivot_table.shape[0])
+            st.metric("Total User Terfilter", pivot_table.shape[1])
+        
+        with c2:
+            st.subheader("Distribusi Rating (Non-Zero)")
+            fig, ax = plt.subplots(figsize=(6, 3))
+            pivot_table.replace(0, np.nan).stack().plot.hist(bins=10, ax=ax, color='green')
+            st.pyplot(fig)
 
-# 4. Main Page - Tampilan Analisis
-col1, col2 = st.columns([1, 1])
+        st.divider()
 
-with col1:
-    st.subheader("Statistik Data Terfilter")
-    st.write(f"Jumlah Buku Populer: {pivot_table.shape[0]}")
-    st.write(f"Jumlah User (USA/Canada): {pivot_table.shape[1]}")
+        # Rekomendasi
+        st.subheader("🔍 Cari Rekomendasi")
+        selected_book = st.selectbox("Pilih judul buku yang Anda sukai:", pivot_table.index)
 
-with col2:
-    # Visualisasi Sederhana Rating Distribution
-    st.subheader("Distribusi Rating")
-    fig, ax = plt.subplots(figsize=(6, 4))
-    # Mengambil sampel data rating non-nol untuk visualisasi
-    pivot_table.replace(0, np.nan).stack().plot.hist(bins=10, ax=ax, color='skyblue')
-    ax.set_xlabel("Rating")
-    st.pyplot(fig)
+        if st.button('Tampilkan Rekomendasi'):
+            distances, indices = model_knn.kneighbors(
+                pivot_table.loc[selected_book, :].values.reshape(1, -1), 
+                n_neighbors=6
+            )
 
-st.divider()
+            st.markdown(f"Buku yang mirip dengan **{selected_book}**:")
+            
+            recom_list = []
+            for i in range(1, len(distances.flatten())):
+                recom_list.append({
+                    "Judul Buku": pivot_table.index[indices.flatten()[i]],
+                    "Skor Kemiripan (Distance)": round(distances.flatten()[i], 4)
+                })
+            
+            st.table(pd.DataFrame(recom_list))
 
-# 5. Hasil Rekomendasi
-if st.button('Berikan Rekomendasi'):
-    distances, indices = model_knn.kneighbors(
-        pivot_table.loc[selected_book, :].values.reshape(1, -1), 
-        n_neighbors=6
-    )
-
-    st.subheader(f"Rekomendasi untuk buku: **{selected_book}**")
-    
-    recom_data = []
-    for i in range(1, len(distances.flatten())):
-        recom_data.append({
-            "Peringkat": i,
-            "Judul Buku": pivot_table.index[indices.flatten()[i]],
-            "Distance (Cosine)": round(distances.flatten()[i], 4)
-        })
-    
-    st.table(pd.DataFrame(recom_data))
-    st.info("Catatan: Semakin rendah nilai *Distance*, semakin mirip buku tersebut dengan buku yang dipilih.")
+    except Exception as e:
+        st.error(f"Terjadi kesalahan saat memproses file: {e}")
+        st.info("Pastikan format kolom di dalam CSV sesuai dengan dataset Book-Crossing.")
 
 else:
-    st.write("Silakan pilih buku di sidebar dan klik tombol rekomendasi.")
+    st.warning("Silakan unggah ketiga file CSV (Books, Users, Ratings) melalui sidebar untuk melanjutkan.")
+    st.image("https://via.placeholder.com/800x400.png?text=Menunggu+Upload+File+CSV", use_column_width=True)
